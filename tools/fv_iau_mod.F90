@@ -78,6 +78,10 @@ module fv_iau_mod
 
   real :: deg2rad,dt,rdt
   integer :: im,jm,km,nfiles,ncid
+
+  integer :: n_soill, n_snowl              !1.27.24 soil and snow layers
+  logical :: do_sfc_inc
+
   integer :: is,  ie,  js,  je
   integer :: npz,ntracers
   character(len=32), allocatable :: tracer_names(:)
@@ -91,6 +95,7 @@ module fv_iau_mod
     real,allocatable :: delp_inc(:,:,:)
     real,allocatable :: delz_inc(:,:,:)
     real,allocatable :: tracer_inc(:,:,:,:)
+    real,allocatable :: stc_inc(:,:,:)   
   end type iau_internal_data_type
   type iau_external_data_type
     real,allocatable :: ua_inc(:,:,:)
@@ -99,6 +104,7 @@ module fv_iau_mod
     real,allocatable :: delp_inc(:,:,:)
     real,allocatable :: delz_inc(:,:,:)
     real,allocatable :: tracer_inc(:,:,:,:)
+    real,allocatable :: stc_inc(:,:,:)   
     logical          :: in_interval = .false.
     logical          :: drymassfixer = .false.
   end type iau_external_data_type
@@ -132,6 +138,10 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
     logical:: found
     integer nfilesall
     integer, allocatable :: idt(:)
+    
+    do_sfc_inc = IPD_Control%iau_do_sfc_inc
+    n_soill = IPD_Control%lsoil     !4  for sfc updates
+   !  n_snowl = IPD_Control%lsnowl
 
     is  = IPD_Control%isc
     ie  = is + IPD_Control%nx-1
@@ -244,6 +254,7 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
     allocate(IAU_Data%delp_inc(is:ie, js:je, km))
     allocate(IAU_Data%delz_inc(is:ie, js:je, km))
     allocate(IAU_Data%tracer_inc(is:ie, js:je, km,ntracers))
+    allocate(IAU_Data%stc_inc(is:ie, js:je, n_soill))
 ! allocate arrays that will hold iau state
     allocate (iau_state%inc1%ua_inc(is:ie, js:je, km))
     allocate (iau_state%inc1%va_inc(is:ie, js:je, km))
@@ -251,6 +262,7 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
     allocate (iau_state%inc1%delp_inc (is:ie, js:je, km))
     allocate (iau_state%inc1%delz_inc (is:ie, js:je, km))
     allocate (iau_state%inc1%tracer_inc(is:ie, js:je, km,ntracers))
+    allocate (iau_state%inc1%stc_inc(is:ie, js:je, n_soill))
     iau_state%hr1=IPD_Control%iaufhrs(1)
     iau_state%wt = 1.0 ! IAU increment filter weights (default 1.0)
     iau_state%wt_normfact = 1.0
@@ -274,7 +286,12 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
        enddo
        iau_state%wt_normfact = (2*nstep+1)/normfact
     endif
-    call read_iau_forcing(IPD_Control,iau_state%inc1,'INPUT/'//trim(IPD_Control%iau_inc_files(1)))
+    if (do_sfc_inc) then 
+      call read_iau_forcing(IPD_Control,iau_state%inc1,'INPUT/'//trim(IPD_Control%iau_inc_files(1)), &
+                                                     'INPUT/'//trim(IPD_Control%iau_inc_files_sfc(1)))
+    else
+      call read_iau_forcing(IPD_Control,iau_state%inc1,'INPUT/'//trim(IPD_Control%iau_inc_files(1)))      
+    endif
     if (nfiles.EQ.1) then  ! only need to get incrments once since constant forcing over window
        call setiauforcing(IPD_Control,IAU_Data,iau_state%wt)
     endif
@@ -285,8 +302,14 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
        allocate (iau_state%inc2%delp_inc (is:ie, js:je, km))
        allocate (iau_state%inc2%delz_inc (is:ie, js:je, km))
        allocate (iau_state%inc2%tracer_inc(is:ie, js:je, km,ntracers))
+       allocate(iau_state%inc2%stc_inc(is:ie, js:je, n_soill))
        iau_state%hr2=IPD_Control%iaufhrs(2)
-       call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(2)))
+       if (do_sfc_inc) then 
+         call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(2)), &
+                                                     'INPUT/'//trim(IPD_Control%iau_inc_files_sfc(2)))
+       else
+         call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(2)))         
+       endif
     endif
 !   print*,'in IAU init',dt,rdt
     IAU_data%drymassfixer = IPD_control%iau_drymassfixer
@@ -370,8 +393,15 @@ subroutine getiauforcing(IPD_Control,IAU_Data)
             iau_state%hr1=iau_state%hr2
             iau_state%hr2=IPD_Control%iaufhrs(itnext)
             iau_state%inc1=iau_state%inc2
-            if (is_master()) print *,'reading next increment file',trim(IPD_Control%iau_inc_files(itnext))
-            call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(itnext)))
+            if (do_sfc_inc) then 
+              if (is_master()) print *,'reading next increment files',trim(IPD_Control%iau_inc_files(itnext)), &
+                                         trim(IPD_Control%iau_inc_files_sfc(itnext))
+              call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(itnext)), &
+                                                            'INPUT/'//trim(IPD_Control%iau_inc_files_sfc(itnext)))
+            else
+              if (is_master()) print *,'reading next increment file',trim(IPD_Control%iau_inc_files(itnext))
+              call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(itnext)))
+            endif
          endif
          call updateiauforcing(IPD_Control,IAU_Data,iau_state%wt)
       endif
@@ -401,6 +431,9 @@ subroutine updateiauforcing(IPD_Control,IAU_Data,wt)
                IAU_Data%tracer_inc(i,j,k,l) =(delt*IAU_state%inc1%tracer_inc(i,j,k,l) + (1.-delt)* IAU_state%inc2%tracer_inc(i,j,k,l))*rdt*wt
             enddo
          enddo
+         do k = 1,n_soill    !         
+            IAU_Data%stc_inc(i,j,k)  =(delt*IAU_state%inc1%stc_inc(i,j,k)  + (1.-delt)* IAU_state%inc2%stc_inc(i,j,k))*rdt*wt
+         end do
        enddo
    enddo
  end subroutine updateiauforcing
@@ -427,15 +460,19 @@ subroutine updateiauforcing(IPD_Control,IAU_Data,wt)
              IAU_Data%tracer_inc(i,j,k,l) =wt*IAU_state%inc1%tracer_inc(i,j,k,l)*rdt
           enddo
        enddo
+       do k = 1,n_soill    !         
+          IAU_Data%stc_inc(i,j,k) = wt*IAU_state%inc1%stc_inc(i,j,k)*rdt
+       end do
     enddo
  enddo
  sphum=get_tracer_index(MODEL_ATMOS,'sphum')
  end subroutine setiauforcing
 
-subroutine read_iau_forcing(IPD_Control,increments,fname)
+subroutine read_iau_forcing(IPD_Control,increments,fname,fname_sfc)
     type (IPD_control_type), intent(in) :: IPD_Control
     type(iau_internal_data_type), intent(inout):: increments
     character(len=*),  intent(in) :: fname
+    character(len=*),  intent(in), optional :: fname_sfc
 !locals
     real, dimension(:,:,:), allocatable:: u_inc, v_inc
 
@@ -446,7 +483,7 @@ subroutine read_iau_forcing(IPD_Control,increments,fname)
     real(kind=R_GRID), dimension(3):: e1, e2, ex, ey
 
     logical:: found
-    integer :: is,  ie,  js,  je
+    integer :: is,  ie,  js,  je, km_store
 
     is  = IPD_Control%isc
     ie  = is + IPD_Control%nx-1
@@ -486,7 +523,31 @@ subroutine read_iau_forcing(IPD_Control,increments,fname)
     enddo
     call close_ncfile(ncid)
     deallocate (wk3)
-
+    
+   !  is_land = .true.
+   if ( present(fname_sfc) ) then
+      if( file_exist(fname_sfc) ) then
+         call open_ncfile( fname_sfc, ncid )        ! open the file
+      else
+         call mpp_error(FATAL,'==> Error in read_iau_forcing sfc: Expected file '&
+            //trim(fname_sfc)//' for DA increment does not exist')
+      endif
+      km_store = km
+      km = 1     ! n_soill Currently each soil layer increment is saved separately
+      allocate ( wk3(1:im,jbeg:jend, 1:km) )
+      ! call interp_inc('stc_inc',increments%stc_inc(:,:,:),jbeg,jend)    !TODO check var name
+      call interp_inc('soilt1_inc',increments%stc_inc(:,:,1),jbeg,jend)
+      call interp_inc('soilt2_inc',increments%stc_inc(:,:,2),jbeg,jend)
+      call interp_inc('soilt3_inc',increments%stc_inc(:,:,3),jbeg,jend)
+      call interp_inc('soilt4_inc',increments%stc_inc(:,:,4),jbeg,jend)
+   !  call interp_inc_sfc('stc_inc',increments%stc_inc(:,:,:),jbeg,jend, n_soill)    
+      call close_ncfile(ncid)
+      deallocate (wk3)
+      km = km_store
+   else
+      if (is_master()) print *,'No IAU inc file for sfc, setting stc_inc=0.'
+      increments%stc_inc(:,:,:) = 0.
+   end if
 
 end subroutine read_iau_forcing
 
@@ -516,6 +577,41 @@ subroutine interp_inc(field_name,var,jbeg,jend)
     enddo
  enddo
 end subroutine interp_inc
+
+subroutine interp_inc_sfc(field_name,var,jbeg,jend, k_lv)  !is_land_in)
+! interpolate increment from GSI gaussian grid to cubed sphere
+! everying is on the A-grid, earth relative
+ character(len=*), intent(in) :: field_name
+ integer, intent(in) :: jbeg, jend, k_lv
+ real, dimension(is:ie,js:je,1:k_lv), intent(inout) :: var
+!  logical, intent(in), optional :: is_land_in
+!  logical :: is_land
+ integer:: i1, i2, j1, k,j,i,ierr 
+!  k_lv = km
+!  is_land = .false.
+!  if ( present(is_land_in) ) is_land = is_land_in
+!  if (is_land) k_lv = n_soill 
+ call check_var_exists(ncid, field_name, ierr)
+ if (ierr == 0) then
+    call get_var3_r4( ncid, field_name, 1,im, jbeg,jend, 1,k_lv, wk3 )   !k, wk3 )
+ else
+    if (is_master()) print *,'warning: no increment for ',trim(field_name),' found, assuming zero'
+    wk3 = 0.
+ endif
+ 
+ do k=1,k_lv       !km
+    do j=js,je
+       do i=is,ie
+          i1 = id1(i,j)
+          i2 = id2(i,j)
+          j1 = jdc(i,j)
+          var(i,j,k) = s2c(i,j,1)*wk3(i1,j1  ,k) + s2c(i,j,2)*wk3(i2,j1  ,k)+&
+                       s2c(i,j,3)*wk3(i2,j1+1,k) + s2c(i,j,4)*wk3(i1,j1+1,k)
+       enddo
+    enddo
+ enddo
+ 
+end subroutine interp_inc_sfc
 
 end module fv_iau_mod
 
